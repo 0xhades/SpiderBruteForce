@@ -1,0 +1,69 @@
+users
+proxies
+passes
+
+make the parameter of loginCheck a number, not string, so if the index is empty, the catching of the
+Exception is (return) in loginCheck
+- error index with proxy = random proxy
+- error index with username = return
+
+example 5 threads:
+    go loginCheck(users[0], passes[0], proxies[0])
+    go loginCheck(users[1], passes[1], proxies[1])
+    go loginCheck(users[2], passes[2], proxies[2])
+    go loginCheck(users[3], passes[3], proxies[3])
+    go loginCheck(users[4], passes[4], proxies[4])
+
+i := 0
+for {
+    if i == len(users) {
+        break
+    }
+    for i := 0; i > threads; i++ {
+        go loginCheck(users[i], passes[i], proxies[i])
+    }
+    i += threads
+}
+
+s1:123
+s2:123
+s3:123
+
+s4:123
+s5:123
+s1:aa123
+
+s2:aa123
+s3:aa123
+s4:aa123
+
+s5:aa123
+
+
+
+for _, pass := range passes {
+
+    userIndex := 0
+    proxyIndex := 0
+    for {
+
+        if userIndex >= len(users) {
+            break
+        }
+
+         if proxyIndex >= len(proxies) {
+            proxyIndex = 0
+        }
+
+        var wg sync.WaitGroup
+        wg.Add(threads)
+        for j := userIndex; j > threads+userIndex; j++ {
+            go loginCheck(users[j], pass, proxies[i], &wg)
+        }
+
+        userIndex += threads
+        proxyIndex += threads
+
+    }
+
+}

